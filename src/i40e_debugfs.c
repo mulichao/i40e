@@ -2078,7 +2078,7 @@ static ssize_t i40e_dbg_command_write(struct file *filp,
 		aq_status = i40e_aq_update_nvm(&pf->hw,
 					       I40E_SR_NVM_CONTROL_WORD,
 					       0x10, sizeof(nvm_word),
-					       &nvm_word, true, NULL);
+					       &nvm_word, true, 0, NULL);
 		/* Save off last admin queue command status before releasing
 		 * the NVM
 		 */
