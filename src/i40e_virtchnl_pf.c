@@ -274,7 +274,7 @@ static void i40e_config_irq_link_list(struct i40e_vf *vf, u16 vsi_id,
 	struct i40e_hw *hw = &pf->hw;
 	u16 vsi_queue_id, pf_queue_id;
 	enum i40e_queue_type qtype;
-	u16 next_q, vector_id;
+	u16 next_q, vector_id, size;
 	u32 reg, reg_idx;
 	u16 itr_idx = 0;
 
@@ -304,9 +304,11 @@ static void i40e_config_irq_link_list(struct i40e_vf *vf, u16 vsi_id,
 				     vsi_queue_id + 1));
 	}
 
-	next_q = find_first_bit(&linklistmap,
-				(I40E_MAX_VSI_QP *
-				 I40E_VIRTCHNL_SUPPORTED_QTYPES));
+	size = I40E_MAX_VSI_QP * I40E_VIRTCHNL_SUPPORTED_QTYPES;
+	next_q = find_first_bit(&linklistmap, size);
+	if (unlikely(next_q == size))
+		goto irq_list_done;
+
 	vsi_queue_id = next_q / I40E_VIRTCHNL_SUPPORTED_QTYPES;
 	qtype = next_q % I40E_VIRTCHNL_SUPPORTED_QTYPES;
 	pf_queue_id = i40e_vc_get_pf_queue_id(vf, vsi_id, vsi_queue_id);
@@ -314,7 +316,7 @@ static void i40e_config_irq_link_list(struct i40e_vf *vf, u16 vsi_id,
 
 	wr32(hw, reg_idx, reg);
 
-	while (next_q < (I40E_MAX_VSI_QP * I40E_VIRTCHNL_SUPPORTED_QTYPES)) {
+	while (next_q < size) {
 		switch (qtype) {
 		case I40E_QUEUE_TYPE_RX:
 			reg_idx = I40E_QINT_RQCTL(pf_queue_id);
@@ -328,12 +330,8 @@ static void i40e_config_irq_link_list(struct i40e_vf *vf, u16 vsi_id,
 			break;
 		}
 
-		next_q = find_next_bit(&linklistmap,
-				       (I40E_MAX_VSI_QP *
-					I40E_VIRTCHNL_SUPPORTED_QTYPES),
-				       next_q + 1);
-		if (next_q <
-		    (I40E_MAX_VSI_QP * I40E_VIRTCHNL_SUPPORTED_QTYPES)) {
+		next_q = find_next_bit(&linklistmap, size, next_q + 1);
+		if (next_q < size) {
 			vsi_queue_id = next_q / I40E_VIRTCHNL_SUPPORTED_QTYPES;
 			qtype = next_q % I40E_VIRTCHNL_SUPPORTED_QTYPES;
 			pf_queue_id = i40e_vc_get_pf_queue_id(vf, vsi_id,
@@ -637,7 +635,7 @@ static int i40e_config_vsi_rx_queue(struct i40e_vf *vf, u16 vsi_id,
 	rx_ctx.dsize = 1;
 
 	/* default values */
-	rx_ctx.lrxqthresh = 2;
+	rx_ctx.lrxqthresh = 1;
 	rx_ctx.crcstrip = 1;
 	rx_ctx.prefena = 1;
 	rx_ctx.l2tsel = 1;
@@ -1364,7 +1362,7 @@ err_alloc:
 		i40e_free_vfs(pf);
 err_iov:
 	/* Re-enable interrupt 0. */
-	i40e_irq_dynamic_enable_icr0(pf, false);
+	i40e_irq_dynamic_enable_icr0(pf);
 	return ret;
 }
 
@@ -2908,6 +2906,7 @@ int i40e_ndo_set_vf_mac(struct net_device *netdev, int vf_id, u8 *mac)
 	struct i40e_mac_filter *f;
 	struct i40e_vf *vf;
 	int ret = 0;
+	struct hlist_node *h;
 	int bkt;
 
 	/* validate the request */
@@ -2946,12 +2945,11 @@ int i40e_ndo_set_vf_mac(struct net_device *netdev, int vf_id, u8 *mac)
 	/* Delete all the filters for this VSI - we're going to kill it
 	 * anyway.
 	 */
-	hash_for_each(vsi->mac_filter_hash, bkt, f, hlist)
+	hash_for_each_safe(vsi->mac_filter_hash, bkt, h, f, hlist)
 		__i40e_del_filter(vsi, f);
 
 	spin_unlock_bh(&vsi->mac_filter_hash_lock);
 
-	dev_info(&pf->pdev->dev, "Setting MAC %pM on VF %d\n", mac, vf_id);
 	/* program mac filter */
 	if (i40e_sync_vsi_filters(vsi)) {
 		dev_err(&pf->pdev->dev, "Unable to program ucast filters\n");
@@ -2959,7 +2957,16 @@ int i40e_ndo_set_vf_mac(struct net_device *netdev, int vf_id, u8 *mac)
 		goto error_param;
 	}
 	ether_addr_copy(vf->default_lan_addr.addr, mac);
-	vf->pf_set_mac = true;
+
+	if (is_zero_ether_addr(mac)) {
+		vf->pf_set_mac = false;
+		dev_info(&pf->pdev->dev, "Removing MAC on VF %d\n", vf_id);
+	} else {
+		vf->pf_set_mac = true;
+		dev_info(&pf->pdev->dev, "Setting MAC %pM on VF %d\n",
+			 mac, vf_id);
+	}
+
 	/* Force the VF driver stop so it has to reload with new MAC address */
 	i40e_vc_disable_vf(vf);
 	dev_info(&pf->pdev->dev, "Reload the VF driver to make this change effective.\n");

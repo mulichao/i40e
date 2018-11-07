@@ -1431,6 +1431,8 @@ static int i40e_set_link_settings(struct net_device *netdev,
 	u8 autoneg;
 	struct ethtool_link_ksettings ksettings_real, *ksettings;
 	u32 advertise[ETHTOOL_LINK_MODE_MASK_U32];
+	u32 safe_supported[ETHTOOL_LINK_MODE_MASK_U32];
+	int i;
 
 	ksettings = &ksettings_real;
 	memcpy(ksettings,
@@ -1461,6 +1463,24 @@ static int i40e_set_link_settings(struct net_device *netdev,
 		return -EOPNOTSUPP;
 	}
 
+	/* save autoneg and speed out of ksettings */
+	autoneg = ksettings->base.autoneg;
+	memcpy(advertise, &ksettings->link_modes.advertising,
+	       sizeof(advertise));
+
+	memset(&safe_ksettings, 0, sizeof(safe_ksettings));
+	/* Get link modes supported by hardware... */
+	i40e_get_link_settings_link_down(hw, &safe_ksettings, pf);
+	memcpy(safe_supported, &safe_ksettings.link_modes.supported,
+	       sizeof(safe_supported));
+	/* ...and check against modes requested by user.
+	 * Return an error if unsupported mode was set.
+	 */
+	for (i = 0; i < ETHTOOL_LINK_MODE_MASK_U32; i++) {
+		if ((advertise[i] & safe_supported[i]) != advertise[i])
+			return -EINVAL;
+	}
+
 	/* get our own copy of the bits to check against */
 	memset(&safe_ksettings, 0, sizeof(struct ethtool_link_ksettings));
 	safe_ksettings.base.cmd                    = ksettings->base.cmd;
@@ -1468,22 +1488,16 @@ static int i40e_set_link_settings(struct net_device *netdev,
 		ksettings->base.link_mode_masks_nwords;
 	i40e_get_link_settings(netdev, &safe_ksettings);
 
-	/* save autoneg and speed out of ksettings */
-	autoneg = ksettings->base.autoneg;
-	memcpy((void *)advertise,
-	       &ksettings->base.link_mode_masks[ETHTOOL_LINK_MODE_MASK_U32],
-	       sizeof(advertise));
-
 	/* set autoneg and speed back to what they currently are */
 	ksettings->base.autoneg = safe_ksettings.base.autoneg;
 	memcpy((void *)ksettings->link_modes.advertising,
 	       safe_ksettings.link_modes.advertising,
 	       sizeof(advertise));
 
-	/* If ksettings and safe_ksettings are not the same now, then they are
-	 * trying to set something that we do not support
+	/* If ksettings.base and safe_ksettings.base are not the same now,
+	 * then they are trying to set something that we do not support.
 	 */
-	if (memcmp(ksettings, &safe_ksettings,
+	if (memcmp(&ksettings->base, &safe_ksettings.base,
 		   sizeof(struct ethtool_link_settings)))
 		return -EOPNOTSUPP;
 
@@ -1546,6 +1560,7 @@ static int i40e_set_link_settings(struct net_device *netdev,
 			autoneg_changed = true;
 		}
 	}
+
 	if (advertise[0] & ADVERTISED_100baseT_Full)
 		config.link_speed |= I40E_LINK_SPEED_100MB;
 	if (advertise[0] & ADVERTISED_1000baseT_Full ||
@@ -4077,7 +4092,7 @@ static int i40e_add_cloud_filter_ethtool(struct i40e_vsi *vsi,
 	if (!vf) {
 		if (ring >= vsi->num_queue_pairs)
 			return -EINVAL;
-		dest_seid = vsi->id;
+		dest_seid = vsi->seid;
 	} else {
 		/* VFs are zero-indexed, so we subtract one here */
 		vf--;
